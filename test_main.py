@@ -207,3 +207,50 @@ def test_train_refreshes_recommendation_cache(monkeypatch):
     assert data["status"] == "success"
     assert data["trained_users"] == 3
     assert set(saved_recommendations.keys()) == {1, 2, 3}
+
+
+def test_hybrid_reranks_with_user_brand_affinity(monkeypatch):
+    products = pd.DataFrame(
+        [
+            {
+                "id": 1,
+                "name": "iPhone",
+                "brand": "Apple",
+                "category": "Smartphone",
+                "specifications": {"screen": "oled"},
+            },
+            {
+                "id": 2,
+                "name": "Galaxy",
+                "brand": "Samsung",
+                "category": "Smartphone",
+                "specifications": {"screen": "oled"},
+            },
+            {
+                "id": 3,
+                "name": "MacBook",
+                "brand": "Apple",
+                "category": "Laptop",
+                "specifications": {"cpu": "m3"},
+            },
+        ]
+    )
+    interactions = pd.DataFrame(
+        [
+            {"user_id": 1, "product_id": 1, "action_type": "PURCHASE"},
+        ]
+    )
+    user_item_matrix = recommendation.build_user_item_matrix(interactions)
+
+    monkeypatch.setattr(recommendation, "get_item_based_cf_scores", lambda *args, **kwargs: {2: 1.0, 3: 0.8})
+    monkeypatch.setattr(recommendation, "get_content_based_scores", lambda *args, **kwargs: {})
+
+    product_ids = recommendation.calculate_hybrid_recommendations(
+        user_id=1,
+        products=products,
+        interactions=interactions,
+        user_item_matrix=user_item_matrix,
+        limit=2,
+    )
+
+    assert product_ids == [3, 2]

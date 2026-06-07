@@ -19,6 +19,7 @@ ACTION_SCORES = {
     "ADD_TO_CART": 2,
     "PURCHASE": 3,
 }
+BRAND_AFFINITY_BONUS_WEIGHT = 1.3
 
 
 def read_database_url_from_env_file(path: Path) -> str | None:
@@ -81,6 +82,7 @@ def fetch_products() -> pd.DataFrame:
         SELECT
             p.id,
             p.name,
+            COALESCE(p.brand, '') AS brand,
             COALESCE(c.name, '') AS category,
             p.specifications
         FROM "Product" p
@@ -92,7 +94,7 @@ def fetch_products() -> pd.DataFrame:
             cursor.execute(query)
             rows = cursor.fetchall()
 
-    return pd.DataFrame(rows, columns=["id", "name", "category", "specifications"])
+    return pd.DataFrame(rows, columns=["id", "name", "brand", "category", "specifications"])
 
 
 def fetch_product_price(product_id: int) -> float:
@@ -269,6 +271,89 @@ def normalize_scores(scores: dict[int, float]) -> dict[int, float]:
     }
 
 
+def get_product_brand_lookup(products: pd.DataFrame) -> dict[int, str]:
+    if products.empty or "brand" not in products.columns:
+        return {}
+
+    brand_lookup: dict[int, str] = {}
+
+    for _index, product in products.iterrows():
+        brand = product.get("brand")
+
+        if not isinstance(brand, str) or not brand.strip():
+            continue
+
+        brand_lookup[int(product["id"])] = brand.strip()
+
+    return brand_lookup
+
+
+def get_user_favorite_brand(
+    user_id: int,
+    interactions: pd.DataFrame,
+    products: pd.DataFrame,
+) -> str | None:
+    if interactions.empty:
+        return None
+
+    required_columns = {"user_id", "product_id", "action_type"}
+
+    if not required_columns.issubset(interactions.columns):
+        return None
+
+    brand_by_product_id = get_product_brand_lookup(products)
+
+    if not brand_by_product_id:
+        return None
+
+    user_interactions = interactions[interactions["user_id"] == user_id].copy()
+
+    if user_interactions.empty:
+        return None
+
+    user_interactions["brand"] = user_interactions["product_id"].map(brand_by_product_id)
+    user_interactions["score"] = user_interactions["action_type"].map(ACTION_SCORES).fillna(0)
+    user_interactions = user_interactions[
+        user_interactions["brand"].notna() & (user_interactions["score"] > 0)
+    ]
+
+    if user_interactions.empty:
+        return None
+
+    brand_scores = user_interactions.groupby("brand")["score"].sum().sort_values(ascending=False)
+
+    if brand_scores.empty:
+        return None
+
+    return str(brand_scores.index[0])
+
+
+def apply_brand_affinity_bonus(
+    scores: dict[int, float],
+    products: pd.DataFrame,
+    favorite_brand: str | None,
+    bonus_weight: float = BRAND_AFFINITY_BONUS_WEIGHT,
+) -> dict[int, float]:
+    if not scores or not favorite_brand or bonus_weight <= 0:
+        return scores
+
+    brand_by_product_id = get_product_brand_lookup(products)
+
+    if not brand_by_product_id:
+        return scores
+
+    normalized_favorite_brand = favorite_brand.strip().casefold()
+
+    return {
+        product_id: (
+            score * bonus_weight
+            if brand_by_product_id.get(product_id, "").casefold() == normalized_favorite_brand
+            else score
+        )
+        for product_id, score in scores.items()
+    }
+
+
 def get_popular_product_scores(interactions: pd.DataFrame) -> dict[int, float]:
     if interactions.empty:
         return {}
@@ -435,6 +520,9 @@ def calculate_hybrid_recommendations(
 
     if not weighted_scores:
         return [int(product_id) for product_id in products["id"].head(limit).tolist()]
+
+    favorite_brand = get_user_favorite_brand(user_id, interactions, products)
+    weighted_scores = apply_brand_affinity_bonus(weighted_scores, products, favorite_brand)
 
     return [
         product_id
