@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pandas as pd
+import httpx
 import psycopg2
 from fastapi import APIRouter, HTTPException
 from psycopg2.extras import Json, RealDictCursor
@@ -20,6 +21,8 @@ ACTION_SCORES = {
     "PURCHASE": 3,
 }
 BRAND_AFFINITY_BONUS_WEIGHT = 1.3
+DEFAULT_AI_WEIGHTS = (0.4, 0.3, 0.3)
+DEFAULT_BACKEND_URL = "http://localhost:5000"
 
 
 def read_database_url_from_env_file(path: Path) -> str | None:
@@ -58,6 +61,36 @@ def get_database_url() -> str:
     raise RuntimeError("DATABASE_URL is not configured")
 
 
+def get_backend_url() -> str:
+    return os.getenv("BACKEND_URL", DEFAULT_BACKEND_URL).rstrip("/")
+
+
+def fetch_ai_weights() -> tuple[float, float, float]:
+    try:
+        headers = {}
+        token = os.getenv("BACKEND_ADMIN_TOKEN")
+
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        response = httpx.get(
+            f"{get_backend_url()}/api/v1/admin/ai-config",
+            headers=headers,
+            timeout=2.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        config = payload.get("data") or payload.get("config") or payload
+
+        collaborative_weight = float(config["collaborativeWeight"])
+        content_weight = float(config["contentWeight"])
+        brand_weight = float(config["brandWeight"])
+
+        return collaborative_weight, content_weight, brand_weight
+    except Exception:
+        return DEFAULT_AI_WEIGHTS
+
+
 def normalize_database_url_for_psycopg(database_url: str) -> str:
     parsed_url = urlsplit(database_url)
     query_params = [
@@ -82,10 +115,11 @@ def fetch_products() -> pd.DataFrame:
         SELECT
             p.id,
             p.name,
-            COALESCE(p.brand, '') AS brand,
+            COALESCE(b.name, '') AS brand,
             COALESCE(c.name, '') AS category,
             p.specifications
         FROM "Product" p
+        LEFT JOIN "Brand" b ON b.id = p."brandId"
         LEFT JOIN "Category" c ON c.id = p."categoryId"
     """
 
@@ -346,7 +380,7 @@ def apply_brand_affinity_bonus(
 
     return {
         product_id: (
-            score * bonus_weight
+            score + bonus_weight
             if brand_by_product_id.get(product_id, "").casefold() == normalized_favorite_brand
             else score
         )
@@ -479,6 +513,7 @@ def calculate_hybrid_recommendations(
     user_item_matrix: pd.DataFrame,
     limit: int = 5,
 ) -> list[int]:
+    collaborative_weight, content_weight, brand_weight = fetch_ai_weights()
     product_ids = {int(product_id) for product_id in products["id"].tolist()}
     weighted_scores: dict[int, float] = {}
 
@@ -500,11 +535,15 @@ def calculate_hybrid_recommendations(
 
         for product_id, score in cf_scores.items():
             if product_id in product_ids:
-                weighted_scores[product_id] = weighted_scores.get(product_id, 0.0) + score * 0.65
+                weighted_scores[product_id] = (
+                    weighted_scores.get(product_id, 0.0) + score * collaborative_weight
+                )
 
         for product_id, score in cbf_scores.items():
             if product_id in product_ids:
-                weighted_scores[product_id] = weighted_scores.get(product_id, 0.0) + score * 0.35
+                weighted_scores[product_id] = (
+                    weighted_scores.get(product_id, 0.0) + score * content_weight
+                )
     else:
         popular_scores = normalize_scores(get_popular_product_scores(interactions))
         seed_product_ids = list(popular_scores.keys())[:3]
@@ -512,17 +551,26 @@ def calculate_hybrid_recommendations(
 
         for product_id, score in popular_scores.items():
             if product_id in product_ids:
-                weighted_scores[product_id] = weighted_scores.get(product_id, 0.0) + score * 0.7
+                weighted_scores[product_id] = (
+                    weighted_scores.get(product_id, 0.0) + score * collaborative_weight
+                )
 
         for product_id, score in cbf_scores.items():
             if product_id in product_ids:
-                weighted_scores[product_id] = weighted_scores.get(product_id, 0.0) + score * 0.3
+                weighted_scores[product_id] = (
+                    weighted_scores.get(product_id, 0.0) + score * content_weight
+                )
 
     if not weighted_scores:
         return [int(product_id) for product_id in products["id"].head(limit).tolist()]
 
     favorite_brand = get_user_favorite_brand(user_id, interactions, products)
-    weighted_scores = apply_brand_affinity_bonus(weighted_scores, products, favorite_brand)
+    weighted_scores = apply_brand_affinity_bonus(
+        weighted_scores,
+        products,
+        favorite_brand,
+        bonus_weight=brand_weight,
+    )
 
     return [
         product_id
@@ -589,6 +637,10 @@ def train_recommendation_cache(limit: int = 5) -> dict[str, Any]:
         "trained_users": len(user_recommendations),
         "message": "Recommendation cache refreshed",
     }
+
+
+def train_model(limit: int = 5) -> dict[str, Any]:
+    return train_recommendation_cache(limit=limit)
 
 
 def get_similar_product_ids(product_id: int, limit: int = 5) -> list[int]:
@@ -735,7 +787,7 @@ def recommend_hybrid_products(user_id: int) -> dict[str, Any]:
 @train_router.post("/train")
 def train_recommendations() -> dict[str, Any]:
     try:
-        result = train_recommendation_cache()
+        result = train_model()
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RuntimeError as error:
