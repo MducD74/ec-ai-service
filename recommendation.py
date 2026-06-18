@@ -22,7 +22,7 @@ ACTION_SCORES = {
 }
 BRAND_AFFINITY_BONUS_WEIGHT = 1.3
 DEFAULT_AI_WEIGHTS = (0.4, 0.3, 0.3)
-DEFAULT_BACKEND_URL = "http://localhost:5000"
+DEFAULT_BACKEND_URL = "http://localhost:3000"
 
 
 def read_database_url_from_env_file(path: Path) -> str | None:
@@ -85,7 +85,6 @@ def fetch_ai_weights() -> tuple[float, float, float]:
         collaborative_weight = float(config["collaborativeWeight"])
         content_weight = float(config["contentWeight"])
         brand_weight = float(config["brandWeight"])
-
         return collaborative_weight, content_weight, brand_weight
     except Exception:
         return DEFAULT_AI_WEIGHTS
@@ -336,12 +335,10 @@ def get_user_favorite_brand(
         return None
 
     brand_by_product_id = get_product_brand_lookup(products)
-
     if not brand_by_product_id:
         return None
 
     user_interactions = interactions[interactions["user_id"] == user_id].copy()
-
     if user_interactions.empty:
         return None
 
@@ -350,10 +347,8 @@ def get_user_favorite_brand(
     user_interactions = user_interactions[
         user_interactions["brand"].notna() & (user_interactions["score"] > 0)
     ]
-
     if user_interactions.empty:
         return None
-
     brand_scores = user_interactions.groupby("brand")["score"].sum().sort_values(ascending=False)
 
     if brand_scores.empty:
@@ -560,7 +555,6 @@ def calculate_hybrid_recommendations(
                 weighted_scores[product_id] = (
                     weighted_scores.get(product_id, 0.0) + score * content_weight
                 )
-
     if not weighted_scores:
         return [int(product_id) for product_id in products["id"].head(limit).tolist()]
 
@@ -602,7 +596,6 @@ def get_cold_start_recommendations(limit: int = 5) -> list[int]:
 
 def train_recommendation_cache(limit: int = 5) -> dict[str, Any]:
     products = fetch_products()
-
     if products.empty:
         raise ValueError("Product database is empty")
 
@@ -769,7 +762,7 @@ def recommend_hybrid_products(user_id: int) -> dict[str, Any]:
         product_ids = fetch_cached_recommendations(user_id)
 
         if product_ids is None:
-            product_ids = get_cold_start_recommendations()
+            product_ids = []
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except RuntimeError as error:
@@ -787,6 +780,7 @@ def recommend_hybrid_products(user_id: int) -> dict[str, Any]:
 @train_router.post("/train")
 def train_recommendations() -> dict[str, Any]:
     try:
+        print("Starting recommendation cache training...")
         result = train_model()
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
