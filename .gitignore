@@ -1,0 +1,7 @@
+# Keep environment variables out of version control
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments (Local dependencies)
+.venv/
