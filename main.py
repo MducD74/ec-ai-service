@@ -3,8 +3,8 @@ from typing import Any
 import pandas as pd
 from fastapi import FastAPI
 from sklearn.metrics.pairwise import cosine_similarity
-from recommendation import router as recommendation_router
-from recommendation import train_router
+from routes import router as recommendation_router
+from routes import train_router
 from middleware.logging_middleware import LoggingMiddleware
 
 app = FastAPI(title="AI Recommendation Service")
